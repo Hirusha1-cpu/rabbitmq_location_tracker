@@ -59,3 +59,9 @@ The application will now be running with:
 - RabbitMQ Management Console: http://localhost:15672 (admin/admin123)
 - Backend: http://localhost:5000
 - Frontend: http://localhost:3000
+
+
+# Check the MongoDB connection:
+mongosh
+use location_tracker
+db.locations.find().sort({timestamp: -1})
