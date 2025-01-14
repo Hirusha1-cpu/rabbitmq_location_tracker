@@ -1,121 +1,248 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { GoogleMap, useLoadScript, Marker } from '@react-google-maps/api';
-import io from 'socket.io-client';
+import { GoogleMap, useLoadScript, Marker, Polyline } from '@react-google-maps/api';
 import axios from 'axios';
 
-const socket = io('http://localhost:5004');
+const WS_URL = 'ws://localhost:8080';
+const API_URL = 'http://localhost:5004';
 
 const Map = () => {
-  const [location, setLocation] = useState({
+  const [userLocation, setUserLocation] = useState({
     latitude: 40.7128,
     longitude: -74.0060
   });
-  
-  const [lastUpdate, setLastUpdate] = useState(null);
+  const [randomLocation, setRandomLocation] = useState(null);
+  const [error, setError] = useState(null);
 
   const { isLoaded, loadError } = useLoadScript({
     googleMapsApiKey: process.env.REACT_APP_GOOGLE_MAPS_API_KEY,
   });
 
-  const mapStyles = {
-    height: "100vh",
-    width: "100%"
-  };
-
-  const center = useMemo(() => ({
-    lat: location.latitude,
-    lng: location.longitude
-  }), [location.latitude, location.longitude]);
-
+  // Fetch latest location from MongoDB on component mount
   useEffect(() => {
-    // Get initial location
-    const fetchInitialLocation = async () => {
+    const fetchLatestLocation = async () => {
       try {
-        const response = await axios.get('http://localhost:5004/api/location/latest');
+        const response = await axios.get(`${API_URL}/api/location/latest`);
         if (response.data) {
-          setLocation({
+          setRandomLocation({
             latitude: response.data.latitude,
-            longitude: response.data.longitude
+            longitude: response.data.longitude,
+            timestamp: response.data.timestamp
           });
-          setLastUpdate(new Date(response.data.timestamp));
         }
       } catch (error) {
-        console.error('Error fetching initial location:', error);
+        console.error('Error fetching latest location:', error);
       }
     };
 
-    fetchInitialLocation();
-
-    // Listen for real-time updates
-    socket.on('locationUpdate', (newLocation) => {
-      setLocation({
-        latitude: newLocation.latitude,
-        longitude: newLocation.longitude
-      });
-      setLastUpdate(new Date(newLocation.timestamp));
-    });
-
-    return () => {
-      socket.off('locationUpdate');
-    };
+    fetchLatestLocation();
   }, []);
 
-  if (loadError) return <div>Error loading maps</div>;
-  if (!isLoaded) return <div>Loading maps...</div>;
+  useEffect(() => {
+    let ws = null;
+    
+    const connectWebSocket = () => {
+      ws = new WebSocket(WS_URL);
+      
+      ws.onopen = () => {
+        console.log('WebSocket connected');
+        setError(null);
+      };
 
-  const markerIcon = {
-    path: "M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z",
-    fillColor: '#FF0000',
-    fillOpacity: 1,
-    strokeWeight: 2,
-    strokeColor: '#FFFFFF',
-    scale: 2,
-    anchor: { x: 12, y: 24 }
-  };
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          console.log('Received WebSocket message:', data);
+          
+          if (data.type === 'random') {
+            setRandomLocation(data);
+          }
+        } catch (error) {
+          console.error('Error parsing WebSocket message:', error);
+        }
+      };
+
+      ws.onclose = () => {
+        console.log('WebSocket disconnected, attempting to reconnect...');
+        setTimeout(connectWebSocket, 3000);
+      };
+
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        setError('WebSocket connection error');
+      };
+    };
+
+    // Set up geolocation tracking
+    if ("geolocation" in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          const newLocation = {
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude
+          };
+          console.log('Got user location:', newLocation);
+          setUserLocation(newLocation);
+          
+          // Connect WebSocket and send initial location
+          connectWebSocket();
+          setTimeout(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              console.log('Sending initial location to WebSocket');
+              ws.send(JSON.stringify(newLocation));
+            }
+          }, 1000);
+        },
+        (error) => {
+          const errorMessage = `Geolocation error: ${error.message}`;
+          setError(errorMessage);
+          console.error(errorMessage);
+        }
+      );
+
+      const watchId = navigator.geolocation.watchPosition(
+        (position) => {
+          const newLocation = {
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude
+          };
+          console.log('Location updated:', newLocation);
+          setUserLocation(newLocation);
+          
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            console.log('Sending updated location to WebSocket');
+            ws.send(JSON.stringify(newLocation));
+          }
+        },
+        (error) => {
+          const errorMessage = `Location watching error: ${error.message}`;
+          setError(errorMessage);
+          console.error(errorMessage);
+        }
+      );
+
+      return () => {
+        navigator.geolocation.clearWatch(watchId);
+        if (ws) {
+          ws.close();
+        }
+      };
+    } else {
+      setError("Geolocation is not supported by this browser");
+    }
+  }, []);
+
+  const center = useMemo(() => ({
+    lat: userLocation.latitude,
+    lng: userLocation.longitude
+  }), [userLocation.latitude, userLocation.longitude]);
+
+  const pathCoordinates = useMemo(() => {
+    if (!randomLocation) return [];
+    return [
+      { lat: userLocation.latitude, lng: userLocation.longitude },
+      { lat: randomLocation.latitude, lng: randomLocation.longitude }
+    ];
+  }, [userLocation, randomLocation]);
+
+  if (loadError) return <div>Error loading maps: {loadError.message}</div>;
+  if (!isLoaded) return <div>Loading maps...</div>;
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100vh' }}>
-      <GoogleMap
-        mapContainerStyle={mapStyles}
-        zoom={15}
-        center={center}
-        options={{
-          zoomControl: true,
-          streetViewControl: true,
-          mapTypeControl: true,
-          fullscreenControl: true,
-        }}
-      >
-        <Marker
-          position={{
-            lat: location.latitude,
-            lng: location.longitude
-          }}
-          icon={markerIcon}
-          animation={2} // Using the numeric value for DROP animation
-        />
-      </GoogleMap>
-      
-      {/* Location Info Overlay */}
-      <div
-        style={{
+      {error && (
+        <div style={{
           position: 'absolute',
           top: '20px',
-          left: '20px',
-          backgroundColor: 'white',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          backgroundColor: '#ff4444',
+          color: 'white',
           padding: '10px',
           borderRadius: '5px',
-          boxShadow: '0 2px 6px rgba(0,0,0,0.3)',
           zIndex: 1000
+        }}>
+          {error}
+        </div>
+      )}
+      
+      <GoogleMap
+        mapContainerStyle={{
+          height: "100vh",
+          width: "100%"
         }}
+        zoom={14}
+        center={center}
       >
-        <div style={{ fontWeight: 'bold', marginBottom: '5px' }}>Current Location</div>
-        <div>Lat: {location.latitude.toFixed(6)}</div>
-        <div>Lon: {location.longitude.toFixed(6)}</div>
-        {lastUpdate && (
-          <div style={{ fontSize: '0.8em', color: '#666', marginTop: '5px' }}>
-            Last Update: {lastUpdate.toLocaleTimeString()}
-          </div>
+        {/* User location marker */}
+        <Marker
+          position={center}
+          icon={{
+            path: window.google.maps.SymbolPath.CIRCLE,
+            scale: 8,
+            fillColor: '#FF0000',
+            fillOpacity: 1,
+            strokeWeight: 2,
+            strokeColor: '#FFFFFF'
+          }}
+        />
+
+        {/* Random location marker */}
+        {randomLocation && (
+          <Marker
+            position={{
+              lat: randomLocation.latitude,
+              lng: randomLocation.longitude
+            }}
+            icon={{
+              path: window.google.maps.SymbolPath.CIRCLE,
+              scale: 8,
+              fillColor: '#0000FF',
+              fillOpacity: 1,
+              strokeWeight: 2,
+              strokeColor: '#FFFFFF'
+            }}
+          />
+        )}
+
+        {/* Path between points */}
+        {randomLocation && (
+          <Polyline
+            path={pathCoordinates}
+            options={{
+              strokeColor: '#4285F4',
+              strokeOpacity: 0.8,
+              strokeWeight: 3,
+              geodesic: true
+            }}
+          />
+        )}
+      </GoogleMap>
+
+      <div style={{
+        position: 'absolute',
+        top: error ? '80px' : '20px',
+        left: '20px',
+        backgroundColor: 'white',
+        padding: '10px',
+        borderRadius: '5px',
+        boxShadow: '0 2px 6px rgba(0,0,0,0.3)',
+        zIndex: 1000
+      }}>
+        <div style={{ fontWeight: 'bold', marginBottom: '5px' }}>Location Info</div>
+        <div>Your Location:</div>
+        <div>Lat: {userLocation.latitude.toFixed(6)}</div>
+        <div>Lon: {userLocation.longitude.toFixed(6)}</div>
+        
+        {randomLocation && (
+          <>
+            <div style={{ marginTop: '10px' }}>Random Location:</div>
+            <div>Lat: {randomLocation.latitude.toFixed(6)}</div>
+            <div>Lon: {randomLocation.longitude.toFixed(6)}</div>
+            <div>Distance: {randomLocation.distance}km</div>
+            <div style={{ fontSize: '0.8em', color: '#666', marginTop: '5px' }}>
+              Last Update: {new Date(randomLocation.timestamp).toLocaleTimeString()}
+            </div>
+          </>
         )}
       </div>
     </div>

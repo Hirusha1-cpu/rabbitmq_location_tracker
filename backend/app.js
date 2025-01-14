@@ -92,7 +92,7 @@ app.get('/api/location/history', async (req, res) => {
 
 setupConsumer().catch(console.error);
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5004;
 httpServer.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
